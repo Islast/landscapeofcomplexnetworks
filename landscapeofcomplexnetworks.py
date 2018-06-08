@@ -12,25 +12,43 @@ def perturb_function(f, node_list, epsilon=0.00000001):
     return lambda x: f_perturbed.get(x)
 
 
-def Fast_search_of_nondegenerate_critical_nodes(networklandscape):
-    G = networklandscape.graph.copy()
-    C = {}
-    basin = {}
-    blank_nodes = {}
+def Fast_search_of_nondegenerate_critical_nodes(nl):
+    '''
+    An algorithm to find the non-degenerate critical nodes of networklandscape
+    based of of [cite]
+
+    Returns nondegenerate_critical_nodes, attraction_basin_map where
+    nondegenerate_critical_nodes is a dictionary mapping an integer k to the
+    nondegenarate critical nodes of index k
+    attraction_basin_map is a dictionary mapping a node x to the unique
+    non-degenarate critical node which...
+    '''
+    G = nl.graph.copy()
+    nondegenerate_critical_nodes = {}
+    attraction_basin_map = {}
     for k in range(len(G)):
-        C[k] = {}
-        vertex_set = sorted(G.nodes(), key=networklandscape.h)
-        for j, v in enumerate(vertex_set):
-            N = {y for y in G.neighbors(v) if y in vertex_set[0:j]}
-            if not N:
-                C[k].update({v: {v}})
-                basin.update({v: v})
-            elif len({basin.get(y) for y in N if y in basin}) == 1:
-                basin[v] = {basin.get(y) for y in N}.pop()
-                C[k][basin[v]].add(v)
-        blank_nodes[k+1] = [x for x in vertex_set if x not in basin]
-        G = G.subgraph(blank_nodes[k+1])
-    return C, basin, blank_nodes
+        nondegenerate_critical_nodes[k] = set()
+        attraction_basin_map[k] = {}
+        V = sorted(G.nodes(), key=nl.h)
+        for v in V:
+            downhill_neighbours = {y for y in G.neighbors(v)
+                                   if nl.h(y) < nl.h(v)}
+            if not downhill_neighbours:
+                # The kth order nondegenerate critical nodes are precisely the
+                # local minima in the subgraph in the kth pass through this for
+                # loop
+                nondegenerate_critical_nodes[k].add(v)
+                attraction_basin_map[k].update({v: v})
+            else:
+                downhill_basins = {attraction_basin_map[k].get(y)
+                                   for y in downhill_neighbours}
+                if (len(downhill_basins) == 1 and downhill_basins != {None}):
+                    attraction_basin_map[k][v] = downhill_basins.pop()
+        # Restrict G to the separatrix
+        coloured = {x for colouring in attraction_basin_map.values()
+                    for x in colouring.keys()}
+        G = G.subgraph(set(V).difference(coloured))
+    return nondegenerate_critical_nodes, attraction_basin_map
 
 
 def recompose(f, n):
@@ -67,18 +85,8 @@ class NetworkLandscape:
             raise ValueError("h is not injective on the vertices of G")
 
         self.graph = G
-        self.h_germ = h
+        self.h = h
         self.directed = self.direct_graph()
-
-    # extend h to a function on nodes or sets of node_list
-    def h(self, x):
-        if x in self.graph.nodes():
-            return self.h_germ(x)
-        elif x.issubset(set(self.graph.nodes())):
-            return max([self.h_germ(v) for v in x])
-        else:
-            raise ValueError("x must be a node or a set of nodes of \
-                             self.graph")
 
     def verify_vertex_set(self, V):
         '''
@@ -124,6 +132,36 @@ class NetworkLandscape:
             V = self.discrete_gradient_flow(V)
         return self.discrete_gradient_flow(V)
 
+    def direct_graph(self):
+        '''
+        This returns a directed graph on the nodes of G
+        an edge (u,v) exists in the new graph if (u,v) is
+        an edge in G and h(u) > h(v)
+        '''
+        G_directed = nx.DiGraph(self.graph)
+        for u, v in self.graph.edges:
+            if self.h(u) < self.h(v):
+                G_directed.remove_edge(u, v)
+            else:
+                G_directed.remove_edge(v, u)
+        return G_directed
+
+    def downhill_path(self, u, v):
+        '''
+        Returns True if a downhill path from u to v exists, False otherwise.
+
+        Equivalently, it evaluates the truth value of the statement
+        "u is reachable from v"
+        '''
+        if self.h(u) <= self.h(v):
+            return False
+        else:
+            if not dag.is_directed_acyclic_graph(self.directed):
+                raise TypeError('NetworkLandscape.directed must be an acyclic\
+                 directed graph')
+            else:
+                return (u in dag.ancestors(self.directed, v))
+
     def local_minima(self):
         '''
         Returns the set of local minima of the NetworkLandscape.
@@ -156,7 +194,7 @@ class NetworkLandscape:
         vertex set V.
         '''
         self.verify_vertex_set(V)
-        return NetworkLandscape(self.graph.subgraph(V), self.h_germ)
+        return NetworkLandscape(self.graph.subgraph(V), self.h)
 
     def deformable(self, path1, path2):
         '''
@@ -172,6 +210,10 @@ class NetworkLandscape:
     # index 1 critical nodes are maximal nodes on paths between index 0
     # critical points (local minima) that are not deformable (minimum energy)
     # paths.
+
+    def nondegenerate_critical_nodes_of_index_1(self):
+        B = self.sub_landscape(self.separatrix())
+        return B.local_minima()
 
     def nought_simplices(self):
         '''
@@ -199,41 +241,12 @@ class NetworkLandscape:
                 if (self.downhill_path(y, x)
                 and self.downhill_path(z, y))]
 
-    def graph_complex(self):
+    def get_simplices(self):
         '''
-        return a SimplicialComplex object containing the simplices of
-        satisfying ...
+        return a list of dionysus.Simplex objects containing the simplices of
+        the NetworkLandscape
         '''
-        return dn.SimplicialComplex(self.two_simplices()
-                                    + self.one_simplices()
-                                    + self.nought_simplices())
-
-    def direct_graph(self):
-        '''
-        This returns a directed graph on the nodes of G
-        an edge (u,v) exists in the new graph if (u,v) is
-        an edge in G and h(u) > h(v)
-        '''
-        G_directed = nx.DiGraph(self.graph)
-        for u, v in self.graph.edges:
-            if self.h(u) < self.h(v):
-                G_directed.remove_edge(u, v)
-            else:
-                G_directed.remove_edge(v, u)
-        return G_directed
-
-    def downhill_path(self, u, v):
-        '''
-        Returns True if a downhill path from u to v exists, False otherwise.
-
-        Equivalently, it evaluates the truth value of the statement
-        "u is reachable from v"
-        '''
-        if self.h(u) <= self.h(v):
-            return False
-        else:
-            if not dag.is_directed_acyclic_graph(self.directed):
-                raise TypeError('NetworkLandscape.directed must be an acyclic\
-                 directed graph')
-            else:
-                return (u in dag.ancestors(self.directed, v))
+        simplices = [*self.two_simplices(),
+                     *self.one_simplices(),
+                     *self.nought_simplices()]
+        return simplices
