@@ -2,10 +2,11 @@ import numpy as np
 import networkx as nx
 import networkx.algorithms.dag as dag
 import functools
-import dionysus as dn
+import mogutda
+import copy
 
 
-def perturb_function(f, node_list, epsilon=0.00000001):
+def perturb_function(f, node_list, epsilon=0.00001):
     f_perturbed = {}
     for x in node_list:
         f_perturbed[x] = f(x) + np.random.uniform(low=0, high=epsilon)
@@ -15,20 +16,25 @@ def perturb_function(f, node_list, epsilon=0.00000001):
 def Fast_search_of_nondegenerate_critical_nodes(nl):
     '''
     An algorithm to find the non-degenerate critical nodes of networklandscape
-    based of of [cite]
+    based off of [cite]
 
     Returns nondegenerate_critical_nodes, attraction_basin_map where
     nondegenerate_critical_nodes is a dictionary mapping an integer k to the
     nondegenarate critical nodes of index k
     attraction_basin_map is a dictionary mapping a node x to the unique
     non-degenarate critical node which...
+
+    nl should be a NetworkLandscape object or a tuple (G,h) where G is a
+    networkx graph and h is an injective function from the nodes of G into an
+    ordered set
     '''
+    if not isinstance(nl, NetworkLandscape):
+        nl = NetworkLandscape(*nl)
     G = nl.graph.copy()
     nondegenerate_critical_nodes = {}
     attraction_basin_map = {}
     for k in range(len(G)):
         nondegenerate_critical_nodes[k] = set()
-        attraction_basin_map[k] = {}
         V = sorted(G.nodes(), key=nl.h)
         for v in V:
             downhill_neighbours = {y for y in G.neighbors(v)
@@ -38,16 +44,14 @@ def Fast_search_of_nondegenerate_critical_nodes(nl):
                 # local minima in the subgraph in the kth pass through this for
                 # loop
                 nondegenerate_critical_nodes[k].add(v)
-                attraction_basin_map[k].update({v: v})
+                attraction_basin_map.update({v: v})
             else:
-                downhill_basins = {attraction_basin_map[k].get(y)
+                downhill_basins = {attraction_basin_map.get(y)
                                    for y in downhill_neighbours}
                 if (len(downhill_basins) == 1 and downhill_basins != {None}):
-                    attraction_basin_map[k][v] = downhill_basins.pop()
+                    attraction_basin_map[v] = downhill_basins.pop()
         # Restrict G to the separatrix
-        coloured = {x for colouring in attraction_basin_map.values()
-                    for x in colouring.keys()}
-        G = G.subgraph(set(V).difference(coloured))
+        G = G.subgraph(set(V).difference(set(attraction_basin_map.keys())))
     return nondegenerate_critical_nodes, attraction_basin_map
 
 
@@ -95,6 +99,14 @@ class NetworkLandscape:
         if not V.issubset(set(self.graph.nodes())):
             raise ValueError("input must be a subset of the nodes of\
                                 self.graph")
+
+    def h_set(self, V):
+        '''
+        returns max(h(x) for x in V) where V is a list, tuple or set of nodes
+        '''
+        V = set(V)
+        self.verify_vertex_set(V)
+        return max([self.h(x) for x in V])
 
     def downhill_neighbours(self, x):
         '''
@@ -211,20 +223,16 @@ class NetworkLandscape:
     # critical points (local minima) that are not deformable (minimum energy)
     # paths.
 
-    def nondegenerate_critical_nodes_of_index_1(self):
-        B = self.sub_landscape(self.separatrix())
-        return B.local_minima()
-
     def nought_simplices(self):
         '''
         Returns a list of the nought simplices of the NetworkLandscape
         '''
-        return [dn.Simplex((node,), self.h(node))
+        return [(node,)
                 for node in self.graph.nodes()]
 
     def one_simplices(self):
 
-        return [dn.Simplex((x, y), max(self.h(x), self.h(y)))
+        return [(x, y)
                 for x in self.graph.nodes()
                 for y in self.graph.nodes()
                 if self.downhill_path(y, x)]
@@ -233,8 +241,7 @@ class NetworkLandscape:
         '''
         Returns a list of the two-simplices of the NetworkLandscape
         '''
-        return [dn.Simplex((x, y, z),
-                max(self.h(x), self.h(y), self.h(z)))
+        return [(x, y, z)
                 for x in self.graph.nodes()
                 for y in self.graph.nodes()
                 for z in self.graph.nodes()
@@ -250,3 +257,38 @@ class NetworkLandscape:
                      *self.one_simplices(),
                      *self.nought_simplices()]
         return simplices
+
+
+def detect_critical_nodes(nl, k):
+    '''
+    '''
+    if k == 0:
+        critical_nodes = []
+        simplices = nl.get_simplices()
+        F = mogutda.SimplicialComplex()
+        nodes = list(nl.graph.nodes())
+        for i, node in enumerate(nodes[0:-1]):
+            Fplus = mogutda.SimplicialComplex(
+                    [s for s in simplices if nl.h_set(s) <= nl.h(nodes[i+1])]
+                    )
+            if Fplus.betti_number(0) > F.betti_number(0):
+                critical_nodes.append(node)
+            F = copy.copy(Fplus)
+
+    elif k >= 1:
+        critical_nodes = []
+        f = recompose(lambda landscape:
+                      landscape.sub_landscape(landscape.separatrix()), k-1)
+        nlk = f(nl)
+        simplices = nlk.get_simplices()
+        F = mogutda.SimplicialComplex()
+        nodes = list(nl.graph.nodes())
+        for i, node in enumerate(nodes[0:-1]):
+            Fplus = mogutda.SimplicialComplex(
+                    [s for s in simplices if nlk.h_set(s) <= nlk.h(nodes[i+1])]
+                    )
+            if (Fplus.betti_number(0) < F.betti_number(0)
+               or Fplus.betti_number(1) > F.betti_number(1)):
+                critical_nodes.append(node)
+            F = copy.copy(Fplus)
+    return critical_nodes
